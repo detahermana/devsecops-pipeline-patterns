@@ -1,0 +1,29 @@
+# Review ownership.
+#
+# Every file requires review from the listed owner before it can be merged.
+# This is what makes the protected-branch rule "Require review from Code
+# Owners" actually require a human, rather than just requiring green checks.
+#
+# IMPORTANT — this file does nothing until the handle below is a real account.
+# GitHub does not error on an unresolvable owner; it simply stops requiring
+# anyone's review, silently. Replace the placeholder before relying on it.
+#
+# --- Adapting this file -----------------------------------------------------
+# Replace @your-github-handle with a real account on every line.
+
+# Blanket rule: everything needs the owner.
+*                       @your-github-handle
+
+# Extra-sensitive paths get an explicit line as well. These are redundant with
+# the rule above while there is a single owner, but they are:
+#   - self-documenting (the file states what is considered sensitive)
+#   - load-bearing the moment a second reviewer is added and the blanket rule
+#     is narrowed, because these lines keep the sensitive paths with the owner
+/.github/               @your-github-handle
+/gitlab-ci/             @your-github-handle
+/github-actions/        @your-github-handle
+/sonar-project.properties @your-github-handle
+
+# The deployment definition itself. A change here changes what runs in
+# production, so it should never be the thing a reviewer skims past.
+/gitlab-ci/docker-compose.yml  @your-github-handle

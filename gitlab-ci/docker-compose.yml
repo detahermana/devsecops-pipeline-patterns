@@ -1,0 +1,52 @@
+# Deploy target for gitlab-ci/build-and-deploy.yml.
+#
+# Images are referenced by commit SHA, not by `latest`. The pipeline passes
+# the SHA in as IMAGE_TAG, so what is running is provably the commit that
+# passed the gates — `latest` could have moved between build and deploy.
+#
+# Copy this file to the deploy host (the pipeline does that with scp) and
+# reference it from DEPLOY_PATH.
+
+name: app
+
+services:
+  backend:
+    image: ${CI_REGISTRY_IMAGE}/backend:${IMAGE_TAG}
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    # Bound to loopback: the host-level reverse proxy is the only thing that
+    # should be able to reach this, and it does so over the loopback interface.
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    image: ${CI_REGISTRY_IMAGE}/frontend:${IMAGE_TAG}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      - backend
+
+# NOTE ON MIGRATIONS
+#
+# Migrations are NOT run from this compose file on every start. Running them
+# from an application entrypoint means several containers can race to apply
+# the same migration on a restart, and a failed migration can leave the
+# container in a restart loop.
+#
+# The pattern used here is a one-shot job, run separately and explicitly:
+#
+#   docker compose run --rm backend alembic upgrade head
+#
+# That gives a single, observable migration step whose exit code can be
+# checked, instead of a side effect of container startup. It also means the
+# deploy can be stopped between "migrate" and "start" if the migration fails —
+# which is what makes the silent-failure problem in docs/incident-regression.md
+# impossible to repeat without noticing.

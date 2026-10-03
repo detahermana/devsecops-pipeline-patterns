@@ -1,0 +1,85 @@
+name: Mirror main to GitLab
+
+# ---------------------------------------------------------------------------
+# The single path code takes from GitHub to GitLab.
+#
+# Why this exists: in this design the working branch is open to more people
+# than production is. Contributors work only on GitHub, on the working branch,
+# and have no GitLab access at all — GitLab is where production and every
+# deployment credential lives. This job is the sole holder of the secret that
+# can push there, so that path is one auditable job instead of an open door.
+#
+# It runs as soon as a commit lands on the protected branch — i.e. right after
+# a reviewed pull request is merged. The gates already had to pass on that PR,
+# and the owner's review is required before merge (branch protection +
+# CODEOWNERS), so the merge itself IS the approval for the mirror run. There
+# is no second button to click after it.
+#
+# GitLab's own pipeline is unchanged by this: the build stage runs
+# automatically once code lands there, and the production deploy stays
+# `when: manual` so the owner still triggers the real deploy as a final,
+# independent gate.
+#
+# --- Adapting this file -----------------------------------------------------
+# Set the two secrets on the `gitlab-mirror` environment (never at repository
+# level — see docs/access-model.md for why that distinction matters):
+#   GITLAB_TOKEN  fine-grained personal access token,
+#                 resource: Code, permission: Push, scoped to one project
+#   GITLAB_REPO   <group>/<project>  (no scheme, no host, no .git)
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: main-to-gitlab
+  # Do NOT cancel an in-progress mirror. A half-pushed mirror is worse than a
+  # slightly delayed one.
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Mirror main to GitLab
+    runs-on: ubuntu-latest
+    # Scopes the secrets below: they are readable only by a run of this job,
+    # never by an arbitrary workflow run on a contributor's branch.
+    environment: gitlab-mirror
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Push main to the GitLab mirror
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_REPO: ${{ secrets.GITLAB_REPO }}
+        run: |
+          if [ -z "$GITLAB_TOKEN" ] || [ -z "$GITLAB_REPO" ]; then
+            echo "::error::GITLAB_TOKEN and/or GITLAB_REPO is not set on the gitlab-mirror environment."
+            exit 1
+          fi
+
+          git remote add gitlab "https://oauth2:${GITLAB_TOKEN}@gitlab.com/${GITLAB_REPO}.git"
+
+          # Plain push, not --force. GitLab's main should only ever move
+          # forward through this job — nothing pushes to it by hand — so a
+          # normal fast-forward push is expected to always succeed. If it
+          # ever does not, something unexpected changed directly on GitLab
+          # and that is worth investigating rather than overwriting.
+          git push gitlab HEAD:main
+
+# NOTE ON THE TOKEN TYPE — this is the part that takes three attempts to get
+# right, so it is written down.
+#
+#   - A GitLab *Deploy Token* cannot push: it has no write_repository scope.
+#   - A *Project Access Token* cannot be created for a project in a group
+#     namespace on the Free plan.
+#   - A legacy *Personal Access Token* works but over-grants: it can push to
+#     every project the owner can reach.
+#
+# What works: a GitLab fine-grained personal access token, scoped to exactly
+# one project, resource "Code", permission "Push". It is still personal (so
+# the group + Free plan restriction does not apply) but scoped down like a
+# project token, so no separate bot account is needed.

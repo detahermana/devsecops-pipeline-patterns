@@ -1,0 +1,12 @@
+# Test and lint tooling. Kept separate from requirements.txt on purpose:
+# the Dockerfile installs only requirements.txt, so nothing here bloats or
+# reaches the production image — it exists for CI and local development.
+#
+# Install with:  pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+aiosqlite==0.20.0
+ruff==0.8.4

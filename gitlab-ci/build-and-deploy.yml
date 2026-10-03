@@ -1,0 +1,171 @@
+# ---------------------------------------------------------------------------
+# Build every image, then deploy them — the GitLab half of the pipeline.
+#
+# GitHub holds the gates and the review flow. This file is what runs once a
+# reviewed commit has been mirrored here, and it is the only place that can
+# reach production: the deploy job runs on the host that holds the
+# credentials, and it stays manual so the owner pulls the trigger personally.
+#
+# Flow:
+#   build stage    — one job per image, tagged with the commit SHA + latest,
+#                    pushed to the GitLab Container Registry
+#   deploy stage   — SSH to the host, ship compose + vhost configs + env files,
+#                    pull the new images by SHA, recreate, wait for readiness,
+#                    then prune old tags keeping the newest N per image
+#
+# --- Adapting this file -----------------------------------------------------
+#   IMAGES              the build matrix below (path -> image name)
+#   DEPLOY_PATH         where the stack lives on the host
+#   the scp list        which config files the deploy ships
+#   the ENV file vars   which GitLab File-type variables carry each .env
+# ---------------------------------------------------------------------------
+
+stages:
+  - build
+  - deploy
+
+variables:
+  DEPLOY_PATH: "/opt/app"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  # How many old image tags to keep per image on the deploy host.
+  KEEP_TAGS: "5"
+
+services:
+  - docker:20.10.16-dind
+
+before_script:
+  - docker info
+  - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+# ---------------------------------------------------------------------------
+# BUILD STAGE
+#
+# One job per image. `rules` caps it to the branches that may reach
+# production — a build from a feature branch has no business in the registry.
+# ---------------------------------------------------------------------------
+
+.build_template: &build_template
+  stage: build
+  image: docker:20.10.16
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"
+
+build_backend:
+  <<: *build_template
+  script:
+    - echo "Building backend..."
+    - docker build -t "$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHA" -t "$CI_REGISTRY_IMAGE/backend:latest" ./examples/app/backend
+    - docker push "$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE/backend:latest"
+
+build_frontend:
+  <<: *build_template
+  script:
+    - echo "Building frontend..."
+    - docker build -t "$CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHA" -t "$CI_REGISTRY_IMAGE/frontend:latest" ./examples/app/frontend
+    - docker push "$CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE/frontend:latest"
+
+# ---------------------------------------------------------------------------
+# DEPLOY STAGE
+#
+# Manual on purpose. Everything before this point is automated so that a
+# human only has to look at the parts that matter; the deploy itself is the
+# last, independent gate, and it stays with the owner.
+# ---------------------------------------------------------------------------
+deploy_production:
+  stage: deploy
+  image: alpine:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"
+      when: manual
+  timeout: 15m
+
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    # tr -d '\r' — a CRLF-encoded key (committed from Windows, or pasted
+    # through a textarea) fails to parse with a bare "error in libcrypto".
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    # ssh-keyscan rather than disabling host checking: this pins the host on
+    # first contact instead of trusting anything that answers on port 22.
+    - ssh-keyscan "$SSH_HOST" >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+
+  script:
+    - echo "Deploying to production..."
+    - ssh "$SSH_USER@$SSH_HOST" "mkdir -p $DEPLOY_PATH/nginx"
+
+    # Compose file and vhost configs.
+    - scp docker-compose.yml "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+    - scp -r nginx/. "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/nginx/"
+
+    # Environment files.
+    #
+    # These come from GitLab *File*-type CI/CD variables, never from the
+    # repository. A File-type variable is written to a temporary path on the
+    # runner, which is what `$VAR` expands to here — so a multi-line .env is
+    # shipped intact. A plain (non-File) variable is single-line only and
+    # silently truncates a multi-line file to its first line.
+    - scp "$ROOT_ENV" "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/.env"
+    - scp "$BACKEND_ENV" "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/backend/.env"
+
+    # Log in on the host so it can pull the private registry images.
+    - ssh "$SSH_USER@$SSH_HOST" "echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY"
+
+    # Recreate with the exact commit being deployed, not `latest`.
+    #
+    # `stop` first (with || true so a first-ever deploy does not fail here),
+    # then `pull`, then `up -d`. Passing the SHA through as an environment
+    # variable is what makes the deployed version provably the one that
+    # passed the gates — `latest` could have moved.
+    - ssh "$SSH_USER@$SSH_HOST" "cd $DEPLOY_PATH && docker compose stop || true"
+    - ssh "$SSH_USER@$SSH_HOST" "cd $DEPLOY_PATH && IMAGE_TAG=$CI_COMMIT_SHA CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE docker compose pull"
+    - ssh "$SSH_USER@$SSH_HOST" "cd $DEPLOY_PATH && IMAGE_TAG=$CI_COMMIT_SHA CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE docker compose up -d"
+
+    # Readiness wait, then a status report that ends up in the job log.
+    # A fixed sleep is crude but honest: the alternative is a retry loop
+    # against a health endpoint, which belongs in the compose healthcheck.
+    - ssh "$SSH_USER@$SSH_HOST" "sleep 30"
+    - ssh "$SSH_USER@$SSH_HOST" "cd $DEPLOY_PATH && docker compose ps"
+
+    # Prune old image tags, keeping the newest $KEEP_TAGS per image.
+    #
+    # Without this the registry and the host both accumulate one image per
+    # deploy forever. Keeping a few means a rollback is a tag change rather
+    # than a rebuild.
+    - |
+      ssh "$SSH_USER@$SSH_HOST" "
+        echo \"Cleaning up old Docker images (keeping newest $KEEP_TAGS per image)...\"
+        for service in backend frontend; do
+          docker images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}' \
+            | grep \"\$CI_REGISTRY_IMAGE/\$service\" \
+            | grep -v latest \
+            | sort -k3 -r \
+            | tail -n +$((KEEP_TAGS + 1)) \
+            | awk '{print \$2}' \
+            | xargs -r docker rmi -f || true
+        done
+        docker system df
+      "
+    - echo "Deployment completed."
+
+# ---------------------------------------------------------------------------
+# NOTES
+#
+# Why the deploy ships env files from CI variables instead of committing them:
+# a committed .env is readable by everyone with repository access. Holding the
+# values as variables means access to production secrets is decoupled from
+# access to the code — which is the whole point of the split described in
+# docs/access-model.md.
+#
+# Why `stop` before `up -d`: it makes the recreate ordering explicit and gives
+# a clean boundary if the pull fails — the old version is down but the new one
+# has not started, rather than a half-mixed state.
+#
+# Why the SHA is passed through as IMAGE_TAG: docker-compose.yml references
+# `${CI_REGISTRY_IMAGE}/backend:${IMAGE_TAG}`. Deploying `latest` would mean
+# the running container might not be the commit that passed the gates.
+# ---------------------------------------------------------------------------

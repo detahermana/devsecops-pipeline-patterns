@@ -1,0 +1,83 @@
+name: Flag workflow file changes
+
+# ---------------------------------------------------------------------------
+# A guardrail that cannot be edited away.
+#
+# The decision here was NOT to hide or auto-reject changes to the pipeline's
+# own definition from contributors — Git already shows any such change in the
+# PR diff, and review is the right control. This workflow is the safety net
+# for that decision: it makes sure a change to the pipeline's security logic
+# is never scrolled past inside a large diff. It gets its own loud comment.
+#
+# It cannot be bypassed by deleting it, because any edit to it is itself a
+# change under .github/workflows/** and would be flagged by the same rule.
+#
+# --- Adapting this file -----------------------------------------------------
+# Adjust the `paths:` list if your protection files live elsewhere.
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request:
+    branches: [main, staging]
+    paths:
+      - ".github/workflows/**"
+      - ".github/CODEOWNERS"
+
+# Declaring a `permissions:` block at all switches GITHUB_TOKEN from its
+# broader defaults to an explicit allow-list — every scope not listed is set
+# to `none`, including `contents`. Omitting `contents: read` here makes the
+# checkout step fail with a misleading "Repository not found" (GitHub reports
+# that instead of a permission error, so a token that cannot read a private
+# repository is not told the repository exists). The minimum checkout needs is
+# `contents: read`.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  flag:
+    name: Comment on workflow/CODEOWNERS changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: List changed workflow/CODEOWNERS files
+        id: changed
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
+          FILES=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD -- '.github/workflows/**' '.github/CODEOWNERS')
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on the pull request
+        if: steps.changed.outputs.files != ''
+        uses: actions/github-script@v7
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        with:
+          script: |
+            const files = process.env.CHANGED_FILES.trim().split('\n').filter(Boolean);
+
+            const body = [
+              '## ⚠️ Pipeline definition changed',
+              '',
+              'This pull request modifies the CI/CD pipeline itself or the review',
+              'ownership rules. These are the controls the rest of the process',
+              'depends on, so they deserve a closer read than the surrounding diff.',
+              '',
+              'Changed files:',
+              ...files.map((f) => `- \`${f}\``),
+              '',
+              'Please confirm the change is intentional and does not weaken a gate,',
+              'the mirror job, or the review requirement.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });

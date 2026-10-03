@@ -1,0 +1,346 @@
+name: Quality Gates
+
+# ---------------------------------------------------------------------------
+# The four gates a change must pass before a human reviews it.
+#
+#   1. Lint + unit tests          (fast feedback, in-memory database)
+#   2. Integration tests          (real Postgres, real migrations)
+#   3. Security scan              (dependency CVEs, Python SAST, npm audit)
+#   4. Code quality               (SonarQube quality gate)
+#
+# Runs on every push to the working branch AND again on the pull request into
+# the protected branch. Running it twice is deliberate: the PR re-verifies the
+# exact commit being merged, not whatever was last pushed to the branch, which
+# may be several commits behind.
+#
+# The gates run entirely against ephemeral, in-CI resources — an in-memory
+# SQLite database, a throwaway Postgres container, a throwaway SonarQube
+# container. No staging server is required or referenced.
+#
+# --- Adapting this file -----------------------------------------------------
+# Replace the two paths marked PROJECT PATHS below to match your layout. The
+# example app lives in examples/app/, so the paths point there; in a real
+# repository they would be ./backend and ./frontend.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [staging]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch or PR cancels the older, now-outdated run
+# instead of letting it finish reporting on stale code.
+concurrency:
+  group: quality-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---- Gate 1: lint + unit tests ------------------------------------------
+  unit-tests:
+    name: "Gate 1: Lint & unit tests"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/app/backend   # PROJECT PATH
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Real history is needed to diff changed files against, not just
+          # the tip commit.
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------------
+      # Changed-files detection.
+      #
+      # Linting runs scoped to only the files that changed in this push or PR.
+      # Why: switching linting on repo-wide would fail immediately on an
+      # unknown number of pre-existing violations unrelated to the change
+      # under review — not a fair or useful gate. Scoped linting still BLOCKS
+      # on any violation in a changed line, so every new and modified line is
+      # held to the standard from day one, and the rest of the codebase is
+      # cleaned up incrementally as files are touched naturally.
+      #
+      # On a PR: diff against the merge-base with the target branch.
+      # On a push: diff against the commit before the push. If no usable base
+      # exists (first push of a new branch), lint nothing rather than guess a
+      # base that could wrongly include unrelated files.
+      # ---------------------------------------------------------------------
+      - name: Determine changed files
+        id: changed-files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            BASE="$(git merge-base "origin/${{ github.base_ref }}" HEAD)"
+          else
+            BASE="${{ github.event.before }}"
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+              BASE=""
+            fi
+          fi
+
+          if [ -z "$BASE" ]; then
+            echo "No usable base commit to diff against — skipping changed-files lint for this run."
+            echo "py_files=" >> "$GITHUB_OUTPUT"
+            echo "js_files=" >> "$GITHUB_OUTPUT"
+          else
+            PY_FILES="$(git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- 'examples/app/backend/*.py' 'examples/app/backend/**/*.py' | sed 's#^examples/app/backend/##' | tr '\n' ' ')"
+            JS_FILES="$(git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- 'examples/app/frontend/src/**/*.js' 'examples/app/frontend/src/**/*.jsx' | sed 's#^examples/app/frontend/##' | tr '\n' ' ')"
+            echo "Changed backend .py files: $PY_FILES"
+            echo "Changed frontend .js/.jsx files: $JS_FILES"
+            echo "py_files=$PY_FILES" >> "$GITHUB_OUTPUT"
+            echo "js_files=$JS_FILES" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            examples/app/backend/requirements.txt
+            examples/app/backend/requirements-dev.txt
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint backend (Ruff) — changed files only
+        if: steps.changed-files.outputs.py_files != ''
+        run: ruff check ${{ steps.changed-files.outputs.py_files }}
+
+      - name: Run backend unit tests (in-memory SQLite)
+        run: pytest --cov=app --cov-report=xml --cov-report=term-missing --junitxml=pytest-results.xml
+
+      - name: Upload backend test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-unit-test-results
+          path: examples/app/backend/pytest-results.xml
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: examples/app/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: examples/app/frontend   # PROJECT PATH
+        run: npm ci
+
+      - name: Lint frontend (ESLint) — changed files only
+        if: steps.changed-files.outputs.js_files != ''
+        working-directory: examples/app/frontend   # PROJECT PATH
+        run: npx eslint ${{ steps.changed-files.outputs.js_files }}
+
+      - name: Run frontend unit tests
+        working-directory: examples/app/frontend   # PROJECT PATH
+        run: npm run test:run
+
+      # Not strictly a test, but a broken production build is exactly the
+      # kind of mistake this pipeline exists to catch before review. It is
+      # cheap, so it rides along with the unit-test gate rather than
+      # warranting its own job.
+      - name: Frontend production build smoke check
+        working-directory: examples/app/frontend   # PROJECT PATH
+        run: npm run build
+
+  # ---- Gate 2: integration tests against real Postgres --------------------
+  integration-tests:
+    name: "Gate 2: Integration tests (real Postgres + migrations)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/app/backend   # PROJECT PATH
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Test-only credentials. This database exists for the lifetime of the
+      # job and is discarded afterwards.
+      DATABASE_URL: postgresql+asyncpg://ci:ci@localhost:5432/ci
+      SECRET_KEY: ci-only-secret-not-for-production
+      HOST_URL: http://localhost:8000
+      # A console script's sys.path does NOT include the invoking working
+      # directory, so `from app.main import Base` in alembic/env.py fails
+      # with ModuleNotFoundError unless something puts the backend directory
+      # on PYTHONPATH. Production does the same thing in its compose file.
+      PYTHONPATH: .
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            examples/app/backend/requirements.txt
+            examples/app/backend/requirements-dev.txt
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # Running the real migrations against a real Postgres, and failing on
+      # any non-zero exit, is the check that was missing when a migration
+      # failed silently in production and left the database behind its head.
+      # See docs/incident-regression.md.
+      - name: Run migrations against a real Postgres database
+        run: alembic upgrade head
+
+      - name: Verify the database landed on the migration head
+        run: |
+          DB_REV=$(alembic current | awk '{print $1}')
+          HEAD_REV=$(alembic heads | awk '{print $1}')
+          echo "Database is at:        $DB_REV"
+          echo "Latest migration head: $HEAD_REV"
+          if [ -z "$DB_REV" ] || [ "$DB_REV" != "$HEAD_REV" ]; then
+            echo "::error::Database revision does not match the migration head — a migration likely failed (possibly silently). See docs/incident-regression.md."
+            exit 1
+          fi
+
+      # Same suite as Gate 1, but pointed at the real, freshly migrated
+      # Postgres instead of the in-memory database. Catches anything
+      # Postgres-specific that the fast suite quietly tolerates.
+      - name: Run integration tests against real Postgres
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://ci:ci@localhost:5432/ci
+        run: pytest tests/test_integration.py -v
+
+  # ---- Gate 3: security scan ----------------------------------------------
+  security-scan:
+    name: "Gate 3: Security scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Dependency / known-CVE scan across the whole repository — Python
+      # requirement files and npm lockfiles alike — so a vulnerable
+      # dependency is caught wherever it is pinned, not just in the paths
+      # this workflow otherwise covers.
+      #
+      # SUPPLY-CHAIN NOTE — read before using this in production.
+      # Version tags on third-party Actions are mutable: an attacker with
+      # compromised credentials can force-push a malicious commit onto an
+      # existing tag and every pipeline referencing that tag runs it. This
+      # is not hypothetical — it happened to this exact Action in 2026, with
+      # malicious code pushed onto 76 of 77 existing tags.
+      #
+      # Before using this pipeline for real, replace the tag below with the
+      # full 40-character commit SHA, copied from the Action's own release
+      # page rather than relayed secondhand:
+      #
+      #   uses: aquasecurity/trivy-action@<40-char-sha> # v0.36.0
+      #
+      # This rule applies to every third-party Action in this file, not just
+      # this one. Tags can be force-pushed. Commit SHAs cannot.
+      - name: Trivy filesystem scan (dependency CVEs)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          format: table
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Bandit (Python SAST)
+        run: |
+          pip install bandit==1.8.0
+          bandit -r examples/app/backend/app -ll
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: npm audit (frontend dependency CVEs)
+        working-directory: examples/app/frontend   # PROJECT PATH
+        # If this fails on a pre-existing transitive advisory with no fix
+        # available yet, that is a real signal, not a broken gate — triage it
+        # (npm audit fix, a version bump, or a documented accepted risk)
+        # rather than loosening the audit level.
+        run: npm audit --audit-level=high
+
+  # ---- Gate 4: code quality ------------------------------------------------
+  code-quality:
+    name: "Gate 4: Code quality (SonarQube)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # SonarQube wants full history for blame and authorship data.
+          fetch-depth: 0
+
+      # SonarQube's embedded Elasticsearch refuses to start without this.
+      - name: Raise vm.max_map_count for SonarQube's embedded Elasticsearch
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      # A self-hosted SonarQube Community Edition, started fresh in this job
+      # and discarded afterwards. Chosen over SonarCloud deliberately: no
+      # lines-of-code cap on private repositories, and no third-party service
+      # holding source code.
+      #
+      # Trade-off accepted: there is no persistent quality-trend dashboard
+      # across runs this way — only this run's pass/fail gate. The
+      # alternative (a small long-lived SonarQube instance on the same host
+      # as the deployment target) trades CI minutes for that history.
+      - name: Start SonarQube Community Edition
+        run: |
+          docker run -d --name sonarqube -p 9000:9000 sonarqube:community
+          echo "Waiting for SonarQube to report status UP..."
+          for i in $(seq 1 60); do
+            status=$(curl -s -u admin:admin http://localhost:9000/api/system/status | grep -o '"status":"[A-Z]*"' || true)
+            echo "  [$i] $status"
+            if echo "$status" | grep -q '"status":"UP"'; then
+              echo "SonarQube is up."
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "::error::SonarQube did not come up in time."
+              docker logs sonarqube --tail 200
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: Generate a SonarQube analysis token
+        id: sonar-token
+        run: |
+          TOKEN=$(curl -s -u admin:admin -X POST \
+            "http://localhost:9000/api/user_tokens/generate" \
+            -d "name=ci-${{ github.run_id }}" | python3 -c "import sys, json; print(json.load(sys.stdin)['token'])")
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: SonarQube scan
+        uses: sonarsource/sonarqube-scan-action@v4
+        env:
+          SONAR_HOST_URL: http://localhost:9000
+          SONAR_TOKEN: ${{ steps.sonar-token.outputs.token }}
+
+      - name: Quality gate check
+        uses: sonarsource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_HOST_URL: http://localhost:9000
+          SONAR_TOKEN: ${{ steps.sonar-token.outputs.token }}

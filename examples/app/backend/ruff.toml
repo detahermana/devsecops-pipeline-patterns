@@ -1,0 +1,37 @@
+# Ruff configuration.
+#
+# The lint gate in CI runs Ruff scoped to *changed files only* (see
+# .github/workflows/quality-gates.yml). The rule set below is deliberately
+# strict — every new or changed line is held to it from day one, while the
+# existing codebase gets cleaned up incrementally as files are touched,
+# rather than requiring one large, unreviewable cleanup PR before linting
+# could be switched on at all.
+
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # import sorting
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "S",   # flake8-bandit (security)
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+
+ignore = [
+    "E501", # line length is enforced by the formatter, not the linter
+]
+
+[lint.per-file-ignores]
+# Tests may use assert and hardcoded values freely.
+"tests/**" = ["S101"]
+# B008 flags `Depends(...)` in an argument default, which is the documented
+# FastAPI dependency-injection pattern — not the mutable-default bug the rule
+# exists to catch. Ignored for the application package, with this comment, so
+# the rule stays active everywhere it is actually useful.
+"app/**" = ["B008"]
