@@ -24,8 +24,12 @@ name: Quality Gates
 # ---------------------------------------------------------------------------
 
 on:
+  # On a real project the gates run against the working branch and again on
+  # the PR into the protected branch. This pattern repository has no separate
+  # working branch, so the gates run on main directly so they are visible in
+  # the Actions tab.
   push:
-    branches: [staging]
+    branches: [staging, main]
   pull_request:
     branches: [main]
 
@@ -44,7 +48,7 @@ jobs:
       run:
         working-directory: examples/app/backend   # PROJECT PATH
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Real history is needed to diff changed files against, not just
           # the tip commit.
@@ -93,7 +97,7 @@ jobs:
           fi
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: pip
@@ -113,13 +117,13 @@ jobs:
 
       - name: Upload backend test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: backend-unit-test-results
           path: examples/app/backend/pytest-results.xml
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
           cache: npm
@@ -182,10 +186,10 @@ jobs:
       PYTHONPATH: .
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: pip
@@ -227,7 +231,7 @@ jobs:
     name: "Gate 3: Security scan"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Dependency / known-CVE scan across the whole repository — Python
       # requirement files and npm lockfiles alike — so a vulnerable
@@ -250,7 +254,7 @@ jobs:
       # This rule applies to every third-party Action in this file, not just
       # this one. Tags can be force-pushed. Commit SHAs cannot.
       - name: Trivy filesystem scan (dependency CVEs)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -259,7 +263,7 @@ jobs:
           format: table
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
@@ -269,7 +273,7 @@ jobs:
           bandit -r examples/app/backend/app -ll
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
 
@@ -286,7 +290,7 @@ jobs:
     name: "Gate 4: Code quality (SonarQube)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # SonarQube wants full history for blame and authorship data.
           fetch-depth: 0
@@ -333,13 +337,13 @@ jobs:
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: SonarQube scan
-        uses: sonarsource/sonarqube-scan-action@v4
+        uses: sonarsource/sonarqube-scan-action@94d4f8ac4aaefccd7fb84bff00b0aeb2d65fcd49 # v4.0.0
         env:
           SONAR_HOST_URL: http://localhost:9000
           SONAR_TOKEN: ${{ steps.sonar-token.outputs.token }}
 
       - name: Quality gate check
-        uses: sonarsource/sonarqube-quality-gate-action@v1
+        uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
         timeout-minutes: 5
         env:
           SONAR_HOST_URL: http://localhost:9000

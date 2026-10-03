@@ -9,7 +9,7 @@ Written as a pattern library: the templates are generic, the reasoning is
 documented alongside them, and a small example application is included so the
 gates have something real to run against.
 
-> Extracted as a reusable pattern from real client work. No client names,
+> Generalized from patterns used in production environments. No client names,
 > domains, hostnames, addresses, or account identifiers appear anywhere in this
 > repository.
 
@@ -42,9 +42,9 @@ it costs: [`docs/access-model.md`](docs/access-model.md).
 
 | Path | What it is |
 |---|---|
-| [`github-actions/quality-gates.yml`](github-actions/quality-gates.yml) | The four gates: lint + unit tests, integration tests against real Postgres, security scan, SonarQube quality gate |
-| [`github-actions/mirror-to-gitlab.yml`](github-actions/mirror-to-gitlab.yml) | The single GitHub → GitLab path, and the token-scoping notes that took three attempts to get right |
-| [`github-actions/flag-workflow-changes.yml`](github-actions/flag-workflow-changes.yml) | Loud PR comment when the pipeline's own definition changes — a guardrail that cannot be edited away |
+| [`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) | The four gates: lint + unit tests, integration tests against real Postgres, security scan, SonarQube quality gate |
+| [`.github/workflows/mirror-to-gitlab.yml`](.github/workflows/mirror-to-gitlab.yml) | The single GitHub → GitLab path, and the token-scoping notes that took three attempts to get right |
+| [`.github/workflows/flag-workflow-changes.yml`](.github/workflows/flag-workflow-changes.yml) | Loud PR comment when the pipeline's own definition changes — a guardrail that cannot be edited away |
 | [`gitlab-ci/build-and-deploy.yml`](gitlab-ci/build-and-deploy.yml) | Build one image per service, deploy by commit SHA, prune old tags |
 | [`docs/access-model.md`](docs/access-model.md) | Who can reach what, and why the split is worth its cost |
 | [`docs/gate-design.md`](docs/gate-design.md) | What each gate answers, and the shape decisions inside each one |

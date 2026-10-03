@@ -72,7 +72,7 @@ person to read the workflow sees a check that looks redundant and removes it.
 
 ## Where it lives in the pipeline
 
-`github-actions/quality-gates.yml`, Gate 2, in two steps:
+`.github/workflows/quality-gates.yml`, Gate 2, in two steps:
 
 - `Run migrations against a real Postgres database` — runs the migration,
   fails on non-zero exit

@@ -58,7 +58,7 @@ hand. A single job holding a single scoped token is auditable in a way that
 "everyone has access" never is.
 
 **The mirror token is scoped to one project.** See the token notes at the
-bottom of `github-actions/mirror-to-gitlab.yml`: a Deploy Token cannot push, a
+bottom of `.github/workflows/mirror-to-gitlab.yml`: a Deploy Token cannot push, a
 Project Access Token is unavailable on a free group project, and a legacy
 personal token over-grants. A fine-grained personal access token, resource
 *Code*, permission *Push*, for one project, is the shape that actually fits.
@@ -76,7 +76,7 @@ waits on a human for a routine build, but `deploy_production` is
 gate, and it does not share a failure mode with the others.
 
 **Editing the pipeline is itself a flagged change.**
-`notify-workflow-changes.yml` comments loudly on any PR touching
+`flag-workflow-changes.yml` comments loudly on any PR touching
 `.github/workflows/**` or `CODEOWNERS`. The choice was not to block these
 edits — Git already shows them in the diff and the reviewer is the right
 control — but to make sure they are never scrolled past in a large PR. It

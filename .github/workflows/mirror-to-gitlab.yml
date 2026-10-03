@@ -42,11 +42,17 @@ jobs:
   mirror:
     name: Mirror main to GitLab
     runs-on: ubuntu-latest
+    # Skip cleanly when the mirror is not configured. In this pattern
+    # repository there is no GitLab target, so the job stays green instead of
+    # failing on a missing secret. On a real project both secrets exist and the
+    # job runs. This guard is also good practice in production: a job whose
+    # inputs are optional should not turn the pipeline red when they are absent.
+    if: ${{ vars.ENABLE_GITLAB_MIRROR == 'true' }}
     # Scopes the secrets below: they are readable only by a run of this job,
     # never by an arbitrary workflow run on a contributor's branch.
     environment: gitlab-mirror
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           ref: main
